@@ -1,0 +1,43 @@
+name: Transfermarkt Enrichment
+
+on:
+  schedule:
+    # Run daily at 3am UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      profile_limit:
+        description: "Max players to process (0 = all)"
+        required: false
+        default: "0"
+        type: string
+      concurrency:
+        description: "Parallel workers (default: 3)"
+        required: false
+        default: "3"
+        type: string
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Transfermarkt Enrichment
+        env:
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          PROFILE_LIMIT: ${{ github.event.inputs.profile_limit || '0' }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency || '3' }}
+        run: npx ts-node --transpile-only src/tm-enrichment.ts
