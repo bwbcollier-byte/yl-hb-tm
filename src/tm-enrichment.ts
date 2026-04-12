@@ -225,24 +225,19 @@ function parseProfileHtml(html: string, tmUrl: string): Partial<TmData> {
     }
 
     // ---- Social media ----
-    // Transfermarkt puts socials in a specific section of the info table
-    $('.info-table__content--bold a[href]').each((_, el) => {
-        const href = $(el).attr('href') || '';
-        const lower = href.toLowerCase();
-        if (lower.includes('instagram.com'))   data.instagram = href;
-        else if (lower.includes('twitter.com') || lower.includes('x.com')) data.twitter = href;
-        else if (lower.includes('facebook.com')) data.facebook = href;
-        else if (lower.includes('tiktok.com')) data.tiktok = href;
-    });
+    // Only look inside the info-table to avoid picking up Transfermarkt's own
+    // footer/header social links (e.g. @transfermarkt_official, @TMuk_news)
+    const isTmAccount = (url: string) => url.toLowerCase().includes('transfermarkt');
 
-    // Also check ext links in "further information" / additional data boxes
-    $('a[href]').each((_, el) => {
-        const href = ($(el).attr('href') || '').toLowerCase();
-        if (!data.instagram && href.includes('instagram.com'))   data.instagram = $(el).attr('href')!;
-        if (!data.twitter   && (href.includes('twitter.com') || href.includes('x.com'))) data.twitter = $(el).attr('href')!;
-        if (!data.facebook  && href.includes('facebook.com'))   data.facebook  = $(el).attr('href')!;
-        if (!data.tiktok    && href.includes('tiktok.com'))     data.tiktok    = $(el).attr('href')!;
-        if (!data.website   && href.includes('official') && !href.includes('transfermarkt')) data.website = $(el).attr('href')!;
+    $('.info-table__content--bold a[href]').each((_, el) => {
+        const href  = $(el).attr('href') || '';
+        const lower = href.toLowerCase();
+        if (isTmAccount(href)) return; // skip TM's own accounts
+        if (lower.includes('instagram.com'))                      data.instagram = href;
+        else if (lower.includes('twitter.com') || lower.includes('x.com')) data.twitter = href;
+        else if (lower.includes('facebook.com'))                  data.facebook  = href;
+        else if (lower.includes('tiktok.com'))                    data.tiktok    = href;
+        else if (!lower.includes('transfermarkt'))                data.website   = href; // official site
     });
 
     // ---- International ----
@@ -328,8 +323,28 @@ async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[
     }
 }
 
-// Note: Transfermarkt gallery images load via JS — no accessible plain-HTTP endpoint found.
-// TM Images (gallery) column will remain empty until a solution is found.
+// ---------------------------------------------------------------------------
+// Step 3 — Fetch gallery images from the Transfermarkt internal API
+// ---------------------------------------------------------------------------
+// Gallery images are rendered by a Svelte web component (<tm-image-gallery>)
+// that calls: GET https://tmapi-alpha.transfermarkt.technology/player/{id}/gallery
+// Response: { data: { images: [ { url, title, source, isPremium } ] } }
+
+async function fetchGalleryImages(playerId: string): Promise<string[]> {
+    await sleep(FETCH_DELAY_MS);
+    try {
+        const url = `https://tmapi-alpha.transfermarkt.technology/player/${playerId}/gallery`;
+        const res = await axios.get(url, {
+            headers: { ...TM_JSON_HEADERS, 'Origin': 'https://www.transfermarkt.com' },
+            timeout: 10000,
+        });
+        const images: any[] = res.data?.data?.images || [];
+        return images.map((img: any) => img.url).filter(Boolean);
+    } catch (e: any) {
+        console.warn(`  [GALLERY ERR] player ${playerId}:`, e.response?.status || e.message);
+        return [];
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Airtable — fetch records from the view
@@ -405,11 +420,12 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
     console.log(`\n🔍 [${index+1}/${total}] ${slug} (${playerId})`);
 
     try {
-        // Fetch profile HTML + performance data in parallel
+        // Fetch profile HTML, performance data, and gallery in parallel
         const profileUrl = `https://www.transfermarkt.com/${slug}/profil/spieler/${playerId}`;
-        const [html, perfData] = await Promise.all([
+        const [html, perfData, galleryUrls] = await Promise.all([
             fetchProfileHtml(profileUrl),
             fetchPerformance(playerId),
+            fetchGalleryImages(playerId),
         ]);
 
         if (!html) {
@@ -433,6 +449,7 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
             appearancesByComp = lines.join('\n');
         }
 
+        if (galleryUrls.length > 0) console.log(`  🖼  Gallery: ${galleryUrls.length} images`);
         console.log(`  ✅ ${profile.displayName} | ${profile.clubName} | ${profile.marketValue} | ${perfData.totals.apps} apps`);
 
         // Map to Airtable fields
@@ -460,7 +477,7 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
             'TM Player Agent/Agency Name':   profile.agentName           || '',
             'TM Player Agent/Agency Link':   profile.agentLink           || '',
             'TM Headshot':                   profile.headshot            || '',
-            'TM Images (gallery)':           '',  // JS-rendered; not available via plain fetch
+            'TM Images (gallery)':           galleryUrls.join('\n'),
             'TM Instagram':                  profile.instagram           || '',
             'TM Facebook':                   profile.facebook            || '',
             'TM Tiktok':                     profile.tiktok              || '',
