@@ -72,6 +72,7 @@ interface TmData {
     shirtNumber:       string;
     dateOfBirth:       string;
     placeOfBirth:      string;
+    birthCountry:      string;   // country name, used to derive CC
     citizenships:      string;
     height:            string;
     position:          string;
@@ -148,6 +149,66 @@ function cleanText(s: string | undefined | null): string {
     return (s || '').replace(/\s+/g, ' ').trim();
 }
 
+// "1,79 m" → "179", "N/A" or blank → ""
+function formatHeight(raw: string): string {
+    if (!raw || raw === 'N/A') return '';
+    const m = raw.replace(',', '.').match(/[\d.]+/);
+    if (!m) return '';
+    return String(Math.round(parseFloat(m[0]) * 100));
+}
+
+// "left" → "Left", "N/A" → ""
+function formatFoot(raw: string): string {
+    if (!raw || raw === 'N/A') return '';
+    return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+}
+
+// Country name → ISO 3166-1 alpha-2 code
+const COUNTRY_CODES: Record<string, string> = {
+    'Afghanistan':'AF','Albania':'AL','Algeria':'DZ','Andorra':'AD','Angola':'AO',
+    'Antigua and Barbuda':'AG','Argentina':'AR','Armenia':'AM','Australia':'AU',
+    'Austria':'AT','Azerbaijan':'AZ','Bahamas':'BS','Bahrain':'BH','Bangladesh':'BD',
+    'Barbados':'BB','Belarus':'BY','Belgium':'BE','Belize':'BZ','Benin':'BJ',
+    'Bhutan':'BT','Bolivia':'BO','Bosnia-Herzegovina':'BA','Bosnia and Herzegovina':'BA',
+    'Botswana':'BW','Brazil':'BR','Brunei':'BN','Bulgaria':'BG','Burkina Faso':'BF',
+    'Burundi':'BI','Cambodia':'KH','Cameroon':'CM','Canada':'CA','Cape Verde':'CV',
+    'Central African Republic':'CF','Chad':'TD','Chile':'CL','China':'CN','Colombia':'CO',
+    'Comoros':'KM','Congo':'CG','Congo DR':'CD','Costa Rica':'CR','Croatia':'HR',
+    'Cuba':'CU','Cyprus':'CY','Czech Republic':'CZ','Czechia':'CZ','Denmark':'DK',
+    'Djibouti':'DJ','Dominica':'DM','Dominican Republic':'DO','Ecuador':'EC','Egypt':'EG',
+    'El Salvador':'SV','Equatorial Guinea':'GQ','Eritrea':'ER','Estonia':'EE',
+    'Eswatini':'SZ','Ethiopia':'ET','Fiji':'FJ','Finland':'FI','France':'FR','Gabon':'GA',
+    'Gambia':'GM','Georgia':'GE','Germany':'DE','Ghana':'GH','Greece':'GR','Grenada':'GD',
+    'Guatemala':'GT','Guinea':'GN','Guinea-Bissau':'GW','Guyana':'GY','Haiti':'HT',
+    'Honduras':'HN','Hungary':'HU','Iceland':'IS','India':'IN','Indonesia':'ID','Iran':'IR',
+    'Iraq':'IQ','Ireland':'IE','Israel':'IL','Italy':'IT','Ivory Coast':'CI',
+    "Côte d'Ivoire":'CI','Jamaica':'JM','Japan':'JP','Jordan':'JO','Kazakhstan':'KZ',
+    'Kenya':'KE','Kosovo':'XK','Kuwait':'KW','Kyrgyzstan':'KG','Laos':'LA','Latvia':'LV',
+    'Lebanon':'LB','Lesotho':'LS','Liberia':'LR','Libya':'LY','Liechtenstein':'LI',
+    'Lithuania':'LT','Luxembourg':'LU','Madagascar':'MG','Malawi':'MW','Malaysia':'MY',
+    'Maldives':'MV','Mali':'ML','Malta':'MT','Mauritania':'MR','Mauritius':'MU',
+    'Mexico':'MX','Moldova':'MD','Monaco':'MC','Mongolia':'MN','Montenegro':'ME',
+    'Morocco':'MA','Mozambique':'MZ','Myanmar':'MM','Namibia':'NA','Nepal':'NP',
+    'Netherlands':'NL','New Zealand':'NZ','Nicaragua':'NI','Niger':'NE','Nigeria':'NG',
+    'North Korea':'KP','North Macedonia':'MK','Norway':'NO','Oman':'OM','Pakistan':'PK',
+    'Palestine':'PS','Panama':'PA','Papua New Guinea':'PG','Paraguay':'PY','Peru':'PE',
+    'Philippines':'PH','Poland':'PL','Portugal':'PT','Qatar':'QA','Romania':'RO',
+    'Russia':'RU','Rwanda':'RW','Saudi Arabia':'SA','Senegal':'SN','Serbia':'RS',
+    'Sierra Leone':'SL','Singapore':'SG','Slovakia':'SK','Slovenia':'SI','Somalia':'SO',
+    'South Africa':'ZA','South Korea':'KR','South Sudan':'SS','Spain':'ES','Sri Lanka':'LK',
+    'Sudan':'SD','Suriname':'SR','Sweden':'SE','Switzerland':'CH','Syria':'SY',
+    'Taiwan':'TW','Tajikistan':'TJ','Tanzania':'TZ','Thailand':'TH','Togo':'TG',
+    'Trinidad and Tobago':'TT','Tunisia':'TN','Turkey':'TR','Turkmenistan':'TM',
+    'Uganda':'UG','Ukraine':'UA','United Arab Emirates':'AE','England':'GB',
+    'United Kingdom':'GB','Scotland':'GB','Wales':'GB','Northern Ireland':'GB',
+    'United States':'US','USA':'US','Uruguay':'UY','Uzbekistan':'UZ','Venezuela':'VE',
+    'Vietnam':'VN','Yemen':'YE','Zambia':'ZM','Zimbabwe':'ZW',
+};
+
+function countryToCode(country: string): string {
+    return COUNTRY_CODES[country.trim()] || '';
+}
+
 // Parse market value string like "€50.00m" or "€800k" → keep as string
 function parseMarketValue($: cheerio.CheerioAPI): string {
     const raw = cleanText($('.data-header__market-value-wrapper').first().text());
@@ -215,29 +276,28 @@ function parseProfileHtml(html: string, tmUrl: string): Partial<TmData> {
     data.marketValueDate = cleanText($('.data-header__last-update').text()).replace(/last update[:\s]*/i, '');
 
     // ---- Facts & data info-table ----
-    const infoRows: Array<[string, string]> = [];
     $('.info-table__content--regular').each((_, el) => {
-        const label = cleanText($(el).text()).toLowerCase();
-        const value = cleanText($(el).next('.info-table__content--bold').text());
-        infoRows.push([label, value]);
-    });
+        const label     = cleanText($(el).text()).toLowerCase();
+        const boldEl    = $(el).next('.info-table__content--bold');
+        const value     = cleanText(boldEl.text());
 
-    for (const [label, value] of infoRows) {
-        if (label.includes('date of birth'))   data.dateOfBirth  = value.replace(/\(\d+\)/, '').trim();
-        if (label.includes('place of birth'))  data.placeOfBirth = value;
-        if (label.includes('height'))          data.height       = value;
-        if (label.includes('citizenship'))     data.citizenships = value;
-        if (label.includes('position'))        data.position     = value;
-        if (label.includes('foot'))            data.foot         = value;
-        if (label.includes('joined'))          {} // not a column — skip
-        if (label.includes('outfitter'))       {} // not a column — skip
+        if (label.includes('date of birth'))  data.dateOfBirth  = value.replace(/\(\d+\)/, '').trim();
+        if (label.includes('place of birth')) {
+            data.placeOfBirth = value;
+            // Extract birth country from the flag img title attribute
+            const countryName = boldEl.find('img').first().attr('title') || '';
+            data.birthCountry = countryName;
+        }
+        if (label.includes('height'))         data.height       = formatHeight(value);
+        if (label.includes('citizenship'))    data.citizenships = value;
+        if (label.includes('position'))       data.position     = value;
+        if (label.includes('foot'))           data.foot         = formatFoot(value);
         if (label.includes('agent')) {
             data.agentName = value;
-            // Agent link
-            const agentHref = $('.info-table__content--bold a[href*="/berater/"]').first().attr('href') || '';
+            const agentHref = boldEl.find('a[href*="/berater/"]').first().attr('href') || '';
             data.agentLink  = agentHref ? `https://www.transfermarkt.com${agentHref}` : '';
         }
-    }
+    });
 
     // ---- Social media ----
     // Only look inside the info-table to avoid picking up Transfermarkt's own
@@ -252,7 +312,7 @@ function parseProfileHtml(html: string, tmUrl: string): Partial<TmData> {
         else if (lower.includes('twitter.com') || lower.includes('x.com')) data.twitter = href;
         else if (lower.includes('facebook.com'))                  data.facebook  = href;
         else if (lower.includes('tiktok.com'))                    data.tiktok    = href;
-        else if (!lower.includes('transfermarkt'))                data.website   = href; // official site
+        else if (!lower.includes('transfermarkt') && href.startsWith('http')) data.website = href; // official site only
     });
 
     // ---- International ----
@@ -473,6 +533,7 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
             'TM Shirt Numbers':              profile.shirtNumber         || '',
             'TM Date of Birth':              profile.dateOfBirth         || '',
             'TM Place of Birth':             profile.placeOfBirth        || '',
+            'TM CC':                         countryToCode(profile.birthCountry || ''),
             'TM Citizenships':               profile.citizenships        || '',
             'TM Height':                     profile.height              || '',
             'TM Position':                   profile.position            || '',
