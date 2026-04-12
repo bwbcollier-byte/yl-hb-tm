@@ -13,7 +13,7 @@ const AIRTABLE_BASE     = process.env.AIRTABLE_BASE     || 'apprT24SuAvV8oZXX';
 const AIRTABLE_TABLE    = process.env.AIRTABLE_TABLE    || 'tblKxel0FfAjklhPe';
 const AIRTABLE_VIEW     = process.env.AIRTABLE_VIEW     || 'viwO4B0htcTlCH69M'; // "Transfermarket Get"
 const PROFILE_LIMIT     = parseInt(process.env.PROFILE_LIMIT || '0');           // 0 = all
-const CONCURRENCY       = parseInt(process.env.CONCURRENCY   || '3');
+const CONCURRENCY       = parseInt(process.env.CONCURRENCY   || '1');
 const FETCH_DELAY_MS    = parseInt(process.env.FETCH_DELAY   || '1500');        // polite delay per request
 
 const AIRTABLE_BATCH    = 10; // Airtable max patch size
@@ -23,14 +23,29 @@ const AIRTABLE_BATCH    = 10; // Airtable max patch size
 // ---------------------------------------------------------------------------
 
 const TM_HEADERS = {
-    'User-Agent':      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'User-Agent':                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language':           'en-US,en;q=0.9',
+    'Accept-Encoding':           'gzip, deflate, br',
+    'Referer':                   'https://www.transfermarkt.com/',
+    'sec-ch-ua':                 '"Chromium";v="120", "Not_A Brand";v="24", "Google Chrome";v="120"',
+    'sec-ch-ua-mobile':          '?0',
+    'sec-ch-ua-platform':        '"macOS"',
+    'sec-fetch-dest':            'document',
+    'sec-fetch-mode':            'navigate',
+    'sec-fetch-site':            'same-origin',
+    'sec-fetch-user':            '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'Cache-Control':             'max-age=0',
+    'Connection':                'keep-alive',
 };
 
 const TM_JSON_HEADERS = {
     ...TM_HEADERS,
-    'Accept': 'application/json, text/plain, */*',
+    'Accept':           'application/json, text/plain, */*',
+    'sec-fetch-dest':   'empty',
+    'sec-fetch-mode':   'cors',
+    'sec-fetch-site':   'same-origin',
     'X-Requested-With': 'XMLHttpRequest',
 };
 
@@ -420,13 +435,11 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
     console.log(`\n🔍 [${index+1}/${total}] ${slug} (${playerId})`);
 
     try {
-        // Fetch profile HTML, performance data, and gallery in parallel
+        // Fetch sequentially — parallel requests trigger TM's bot detection
         const profileUrl = `https://www.transfermarkt.com/${slug}/profil/spieler/${playerId}`;
-        const [html, perfData, galleryUrls] = await Promise.all([
-            fetchProfileHtml(profileUrl),
-            fetchPerformance(playerId),
-            fetchGalleryImages(playerId),
-        ]);
+        const html        = await fetchProfileHtml(profileUrl);
+        const perfData    = await fetchPerformance(playerId);
+        const galleryUrls = await fetchGalleryImages(playerId);
 
         if (!html) {
             console.warn(`  ❌ Failed to fetch profile HTML`);
