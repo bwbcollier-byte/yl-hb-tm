@@ -184,9 +184,12 @@ function parseProfileHtml(html: string, tmUrl: string): Partial<TmData> {
         if (label && value) headerLabels[label] = value;
     });
 
-    data.clubName       = cleanText($('.data-header__club a').first().attr('title') || $('.data-header__club a').first().text());
-    const clubHref      = $('.data-header__club a').first().attr('href') || '';
-    data.clubLink       = clubHref ? `https://www.transfermarkt.com${clubHref}` : '';
+    // Active players: club is an <a> inside .data-header__club
+    // Retired players: .data-header__club contains plain text "Retired" with no <a>
+    const clubAnchor = $('.data-header__club a').first();
+    data.clubName    = cleanText(clubAnchor.attr('title') || clubAnchor.text() || $('.data-header__club').first().text());
+    const clubHref   = clubAnchor.attr('href') || '';
+    data.clubLink    = clubHref ? `https://www.transfermarkt.com${clubHref}` : '';
     data.contractExpiry = headerLabels['contract expires'] || '';
 
     // League
@@ -272,31 +275,9 @@ function parseProfileHtml(html: string, tmUrl: string): Partial<TmData> {
     data.trophies = trophyTitles.join(', ');
 
     // ---- Headshot ----
-    // Main profile photo — usually in .data-header__profile-image or similar
-    const headshotEl = $('img.data-header__profile-image, .data-header__box--big img').first();
+    // Player headshot is .data-header__profile-image — NOT the club crest in .data-header__box--big
+    const headshotEl = $('img.data-header__profile-image').first();
     data.headshot = headshotEl.attr('src') || headshotEl.attr('data-src') || '';
-
-    // ---- Gallery images ----
-    // Gallery section uses data-src on lazy-loaded <img> tags inside the gallery box
-    const galleryUrls: string[] = [];
-    $('div.gallery img, .gallery-slider img, section.gallery img').each((_, el) => {
-        const src = $(el).attr('data-src') || $(el).attr('src') || '';
-        if (src && src.includes('http') && !src.includes('placeholder')) {
-            galleryUrls.push(src);
-        }
-    });
-    // Fallback: look for the gallery section by heading text
-    if (galleryUrls.length === 0) {
-        $('h2').each((_, el) => {
-            if (cleanText($(el).text()).toLowerCase() === 'gallery') {
-                $(el).parent().find('img').each((_, img) => {
-                    const src = $(img).attr('data-src') || $(img).attr('src') || '';
-                    if (src && src.includes('http')) galleryUrls.push(src);
-                });
-            }
-        });
-    }
-    data.images = galleryUrls.join('\n');
 
     return data;
 }
@@ -347,50 +328,8 @@ async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step 3 — Fetch gallery images from the /galerie page (separate URL)
-// ---------------------------------------------------------------------------
-
-async function fetchGalleryImages(slug: string, playerId: string): Promise<string[]> {
-    await sleep(FETCH_DELAY_MS);
-    try {
-        const url = `https://www.transfermarkt.com/${slug}/galerie/spieler/${playerId}`;
-        const res = await axios.get(url, { headers: TM_HEADERS, timeout: 10000 });
-        const $ = cheerio.load(res.data as string);
-
-        const urls: string[] = [];
-
-        // Gallery thumbnails — full-size links are in the <a href> wrapping each img
-        $('a[href*="/galerie/"], a[data-fancybox]').each((_, el) => {
-            const href = $(el).attr('href') || '';
-            // Try to get the full-res image from the anchor href (sometimes direct image link)
-            if (href.match(/\.(jpg|jpeg|png|webp)/i)) {
-                urls.push(href.startsWith('http') ? href : `https://www.transfermarkt.com${href}`);
-            }
-        });
-
-        // Fallback: lazy-loaded img data-src inside gallery
-        if (urls.length === 0) {
-            $('img[data-src], img[src]').each((_, el) => {
-                const src = $(el).attr('data-src') || $(el).attr('src') || '';
-                // Filter out tiny thumbnails/icons — only keep actual photos
-                if (src && src.includes('images.transfermarkt') && !src.includes('tiny') && !src.includes('icon')) {
-                    // Try to convert thumb URL to full-size
-                    const fullSize = src
-                        .replace('/thumb/', '/medium/')
-                        .replace('/small/', '/big/')
-                        .replace('_thumbnail', '');
-                    urls.push(fullSize);
-                }
-            });
-        }
-
-        return [...new Set(urls)]; // deduplicate
-    } catch (e: any) {
-        console.warn(`  [GALLERY ERR] ${slug}/${playerId}:`, e.response?.status || e.message);
-        return [];
-    }
-}
+// Note: Transfermarkt gallery images load via JS — no accessible plain-HTTP endpoint found.
+// TM Images (gallery) column will remain empty until a solution is found.
 
 // ---------------------------------------------------------------------------
 // Airtable — fetch records from the view
@@ -485,14 +424,6 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
 
         const profile = parseProfileHtml(html, normUrl);
 
-        // Fetch gallery separately if profile parse didn't find images
-        let galleryImages = profile.images || '';
-        if (!galleryImages) {
-            const imgs = await fetchGalleryImages(slug, playerId);
-            galleryImages = imgs.join('\n');
-            if (imgs.length > 0) console.log(`  🖼  Gallery: ${imgs.length} images`);
-        }
-
         // Build appearances summary string (most recent seasons first, top 10)
         let appearancesByComp = '';
         if (perfData.entries.length > 0) {
@@ -505,42 +436,43 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
         console.log(`  ✅ ${profile.displayName} | ${profile.clubName} | ${profile.marketValue} | ${perfData.totals.apps} apps`);
 
         // Map to Airtable fields
+        // Note: TM Total Appearances / Goals / Assists are text fields — send as strings
         const fields: Record<string, any> = {
-            'TM Full Name':               profile.fullName         || '',
-            'TM Display Name':            profile.displayName      || '',
-            'TM Shirt Numbers':           profile.shirtNumber      || '',
-            'TM Date of Birth':           profile.dateOfBirth      || '',
-            'TM Place of Birth':          profile.placeOfBirth     || '',
-            'TM Citizenships':            profile.citizenships     || '',
-            'TM Height':                  profile.height           || '',
-            'TM Position':                profile.position         || '',
-            'TM Preferred Foot':          profile.foot             || '',
-            'TM Club Name':               profile.clubName         || '',
-            'TM Club Link':               profile.clubLink         || '',
-            'TM League Names':            profile.leagueNames      || '',
-            'TM Contract Expiry Date':    profile.contractExpiry   || '',
-            'TM Current Market Value':    profile.marketValue      || '',
-            'TM Last Updated Date':       profile.marketValueDate  || '',
-            'RM Current International Team': profile.currentIntlTeam || '',
-            'TM National Caps':           profile.nationalCaps     || '',
-            'TM National Goals':          profile.nationalGoals    || '',
-            'TM Trophies won':            profile.trophies         || '',
-            'TM Player Agent/Agency Name': profile.agentName       || '',
-            'TM Player Agent/Agency Link': profile.agentLink       || '',
-            'TM Headshot':                profile.headshot         || '',
-            'TM Images (gallery)':         galleryImages            || '',
-            'TM Instagram':               profile.instagram        || '',
-            'TM Facebook':                profile.facebook         || '',
-            'TM Tiktok':                  profile.tiktok           || '',
-            'TM Twitter':                 profile.twitter          || '',
-            'TM Website':                 profile.website          || '',
-            'TM Appearances by comp':     appearancesByComp        || '',
-            'TM Total Appearances':       perfData.totals.apps     || 0,
-            'TM Goals':                   perfData.totals.goals    || 0,
-            'TM Assists':                 perfData.totals.assists  || 0,
-            'TM Data Status':             'Complete',
-            'TM Last Check':              new Date().toISOString().split('T')[0],
-            'TM Update':                  new Date().toISOString(),
+            'TM Full Name':                  profile.fullName            || '',
+            'TM Display Name':               profile.displayName         || '',
+            'TM Shirt Numbers':              profile.shirtNumber         || '',
+            'TM Date of Birth':              profile.dateOfBirth         || '',
+            'TM Place of Birth':             profile.placeOfBirth        || '',
+            'TM Citizenships':               profile.citizenships        || '',
+            'TM Height':                     profile.height              || '',
+            'TM Position':                   profile.position            || '',
+            'TM Preferred Foot':             profile.foot                || '',
+            'TM Club Name':                  profile.clubName            || '',
+            'TM Club Link':                  profile.clubLink            || '',
+            'TM League Names':               profile.leagueNames         || '',
+            'TM Contract Expiry Date':       profile.contractExpiry      || '',
+            'TM Current Market Value':       profile.marketValue         || '',
+            'TM Last Updated Date':          profile.marketValueDate     || '',
+            'RM Current International Team': profile.currentIntlTeam     || '',
+            'TM National Caps':              profile.nationalCaps        || '',
+            'TM National Goals':             profile.nationalGoals       || '',
+            'TM Trophies won':               profile.trophies            || '',
+            'TM Player Agent/Agency Name':   profile.agentName           || '',
+            'TM Player Agent/Agency Link':   profile.agentLink           || '',
+            'TM Headshot':                   profile.headshot            || '',
+            'TM Images (gallery)':           '',  // JS-rendered; not available via plain fetch
+            'TM Instagram':                  profile.instagram           || '',
+            'TM Facebook':                   profile.facebook            || '',
+            'TM Tiktok':                     profile.tiktok              || '',
+            'TM Twitter':                    profile.twitter             || '',
+            'TM Website':                    profile.website             || '',
+            'TM Appearances by comp':        appearancesByComp           || '',
+            'TM Total Appearances':          String(perfData.totals.apps    || ''),
+            'TM Goals':                      String(perfData.totals.goals   || ''),
+            'TM Assists':                    String(perfData.totals.assists || ''),
+            'TM Data Status':                'Complete',
+            'TM Last Check':                 new Date().toISOString().split('T')[0],
+            'TM Update':                     new Date().toISOString(),
         };
 
         updateQueue.push({ id: record.id, fields });
