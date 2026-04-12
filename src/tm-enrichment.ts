@@ -217,18 +217,36 @@ function parseMarketValue($: cheerio.CheerioAPI): string {
 }
 
 // ---------------------------------------------------------------------------
+// Global TM request queue — serialises ALL requests to transfermarkt.com
+// regardless of how many concurrent workers are running, with a minimum
+// delay between each request to avoid triggering bot detection.
+// ---------------------------------------------------------------------------
+let tmQueue = Promise.resolve();
+
+function tmRequest<T>(fn: () => Promise<T>): Promise<T> {
+    const result: Promise<T> = tmQueue.then(async () => {
+        await sleep(FETCH_DELAY_MS);
+        return fn();
+    });
+    // Chain off the settled promise (ignore errors so the queue keeps moving)
+    tmQueue = result.then(() => {}, () => {});
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Step 1 — Scrape HTML profile page
 // ---------------------------------------------------------------------------
 
 async function fetchProfileHtml(tmUrl: string): Promise<string | null> {
-    await sleep(FETCH_DELAY_MS);
-    try {
-        const res = await axios.get(tmUrl, { headers: TM_HEADERS, timeout: 15000 });
-        return res.data as string;
-    } catch (e: any) {
-        console.warn(`  [HTTP ${e.response?.status || 'ERR'}] ${tmUrl}: ${e.message}`);
-        return null;
-    }
+    return tmRequest(async () => {
+        try {
+            const res = await axios.get(tmUrl, { headers: TM_HEADERS, timeout: 15000 });
+            return res.data as string;
+        } catch (e: any) {
+            console.warn(`  [HTTP ${e.response?.status || 'ERR'}] ${tmUrl}: ${e.message}`);
+            return null;
+        }
+    });
 }
 
 function parseProfileHtml(html: string, tmUrl: string): Partial<TmData> {
@@ -368,8 +386,8 @@ interface PerfEntry {
 }
 
 async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[]; totals: { apps: number; goals: number; assists: number } }> {
-    await sleep(FETCH_DELAY_MS);
-    try {
+    return tmRequest(async () => {
+        try {
         const url = `https://www.transfermarkt.com/ceapi/player/performance/${playerId}`;
         const res = await axios.get(url, { headers: TM_JSON_HEADERS, timeout: 10000 });
         const rows: any[] = res.data?.performances || res.data || [];
@@ -392,10 +410,11 @@ async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[
         }), { apps: 0, goals: 0, assists: 0 });
 
         return { entries, totals };
-    } catch (e: any) {
-        console.warn(`  [PERF ERR] player ${playerId}:`, e.response?.status || e.message);
-        return { entries: [], totals: { apps: 0, goals: 0, assists: 0 } };
-    }
+        } catch (e: any) {
+            console.warn(`  [PERF ERR] player ${playerId}:`, e.response?.status || e.message);
+            return { entries: [], totals: { apps: 0, goals: 0, assists: 0 } };
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -406,19 +425,20 @@ async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[
 // Response: { data: { images: [ { url, title, source, isPremium } ] } }
 
 async function fetchGalleryImages(playerId: string): Promise<string[]> {
-    await sleep(FETCH_DELAY_MS);
-    try {
-        const url = `https://tmapi-alpha.transfermarkt.technology/player/${playerId}/gallery`;
-        const res = await axios.get(url, {
-            headers: { ...TM_JSON_HEADERS, 'Origin': 'https://www.transfermarkt.com' },
-            timeout: 10000,
-        });
-        const images: any[] = res.data?.data?.images || [];
-        return images.map((img: any) => img.url).filter(Boolean);
-    } catch (e: any) {
-        console.warn(`  [GALLERY ERR] player ${playerId}:`, e.response?.status || e.message);
-        return [];
-    }
+    return tmRequest(async () => {
+        try {
+            const url = `https://tmapi-alpha.transfermarkt.technology/player/${playerId}/gallery`;
+            const res = await axios.get(url, {
+                headers: { ...TM_JSON_HEADERS, 'Origin': 'https://www.transfermarkt.com' },
+                timeout: 10000,
+            });
+            const images: any[] = res.data?.data?.images || [];
+            return images.map((img: any) => img.url).filter(Boolean);
+        } catch (e: any) {
+            console.warn(`  [GALLERY ERR] player ${playerId}:`, e.response?.status || e.message);
+            return [];
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
