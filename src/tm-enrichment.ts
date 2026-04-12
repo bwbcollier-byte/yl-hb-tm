@@ -528,7 +528,7 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
             'TM Player Agent/Agency Name': profile.agentName       || '',
             'TM Player Agent/Agency Link': profile.agentLink       || '',
             'TM Headshot':                profile.headshot         || '',
-            'TM Images':                  galleryImages            || '',
+            'TM Images (gallery)':         galleryImages            || '',
             'TM Instagram':               profile.instagram        || '',
             'TM Facebook':                profile.facebook         || '',
             'TM Tiktok':                  profile.tiktok           || '',
