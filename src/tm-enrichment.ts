@@ -451,7 +451,7 @@ async function fetchAirtableRecords(): Promise<AirtableRecord[]> {
     let offset: string | undefined;
 
     do {
-        const params: Record<string, any> = { view: AIRTABLE_VIEW, maxRecords: 100 };
+        const params: Record<string, any> = { view: AIRTABLE_VIEW, pageSize: 100 };
         if (offset) params.offset = offset;
         const res = await airtable.get('', { params });
         allRecords.push(...res.data.records);
