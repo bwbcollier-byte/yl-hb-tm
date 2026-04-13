@@ -226,6 +226,11 @@ function parseMarketValue($: cheerio.CheerioAPI): string {
 let tmQueue = Promise.resolve();
 
 function tmRequest<T>(fn: () => Promise<T>): Promise<T> {
+    // If we're using a proxy, don't serialize — let the concurrency limit handle parallel requests
+    if (USE_PROXY) {
+        return fn();
+    }
+
     const result: Promise<T> = tmQueue.then(async () => {
         await sleep(FETCH_DELAY_MS);
         return fn();
