@@ -10,13 +10,13 @@ import * as cheerio from 'cheerio';
 
 const AIRTABLE_API_KEY  = process.env.AIRTABLE_API_KEY!;
 const RAPIDAPI_KEY      = process.env.RAPIDAPI_KEY || '';
+const USE_PROXY         = !!RAPIDAPI_KEY;                                       // auto-detect proxy mode
 const AIRTABLE_BASE     = process.env.AIRTABLE_BASE     || 'apprT24SuAvV8oZXX';
 const AIRTABLE_TABLE    = process.env.AIRTABLE_TABLE    || 'tblKxel0FfAjklhPe';
 const AIRTABLE_VIEW     = process.env.AIRTABLE_VIEW     || 'viwO4B0htcTlCH69M'; // "Transfermarket Get"
 const PROFILE_LIMIT     = parseInt(process.env.PROFILE_LIMIT || '0');           // 0 = all
-const CONCURRENCY       = parseInt(process.env.CONCURRENCY   || '1');
-const FETCH_DELAY_MS    = parseInt(process.env.FETCH_DELAY   || '2000');        // polite delay per request
-const USE_PROXY         = !!RAPIDAPI_KEY;                                       // auto-detect proxy mode
+const CONCURRENCY       = parseInt(process.env.CONCURRENCY   || (USE_PROXY ? '10' : '1'));
+const FETCH_DELAY_MS    = parseInt(process.env.FETCH_DELAY   || (USE_PROXY ? '0' : '2000')); // zero delay if proxy
 
 const AIRTABLE_BATCH    = 10; // Airtable max patch size
 
@@ -426,10 +426,32 @@ interface PerfEntry {
 
 async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[]; totals: { apps: number; goals: number; assists: number } }> {
     return tmRequest(async () => {
-        try {
-        const url = `https://www.transfermarkt.com/ceapi/player/performance/${playerId}`;
-        const res = await axios.get(url, { headers: TM_JSON_HEADERS, timeout: 10000 });
-        const rows: any[] = res.data?.performances || res.data || [];
+        const maxRetries = USE_PROXY ? 2 : 1;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                const url = `https://www.transfermarkt.com/ceapi/player/performance/${playerId}`;
+                let res;
+                if (USE_PROXY) {
+                    res = await axios.get('https://proxycrawl-crawling.p.rapidapi.com/', {
+                        params: { url },
+                        headers: {
+                            'x-rapidapi-host': 'proxycrawl-crawling.p.rapidapi.com',
+                            'x-rapidapi-key': RAPIDAPI_KEY,
+                        },
+                        timeout: 30000,
+                    });
+                } else {
+                    res = await axios.get(url, { headers: TM_JSON_HEADERS, timeout: 10000 });
+                }
+
+                // If ProxyCrawl fails, it might return an HTML string showing Cloudflare / Captcha
+                if (typeof res.data === 'string' && (res.data.includes('Access Denied') || res.data.includes('captcha'))) {
+                    console.warn(`  [PERF BLOCKED] player ${playerId} — anti-bot detected`);
+                    if (attempt < maxRetries - 1) { await sleep((attempt + 1) * 3000); continue; }
+                    throw new Error('Blocked by anti-bot');
+                }
+
+                const rows: any[] = res.data?.performances || res.data || [];
 
         const entries: PerfEntry[] = rows.map((r: any) => ({
             competition:   r.competitionDescription || r.competition || '',
@@ -449,10 +471,17 @@ async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[
         }), { apps: 0, goals: 0, assists: 0 });
 
         return { entries, totals };
-        } catch (e: any) {
-            console.warn(`  [PERF ERR] player ${playerId}:`, e.response?.status || e.message);
-            return { entries: [], totals: { apps: 0, goals: 0, assists: 0 } };
+            } catch (e: any) {
+                const status = e.response?.status;
+                if ((status === 403 || status === 429 || status === 502 || status === 503) && attempt < maxRetries - 1) {
+                    await sleep((attempt + 1) * 3000);
+                    continue;
+                }
+                console.warn(`  [PERF ERR] player ${playerId}:`, status || e.message);
+                return { entries: [], totals: { apps: 0, goals: 0, assists: 0 } };
+            }
         }
+        return { entries: [], totals: { apps: 0, goals: 0, assists: 0 } };
     });
 }
 
@@ -465,18 +494,46 @@ async function fetchPerformance(playerId: string): Promise<{ entries: PerfEntry[
 
 async function fetchGalleryImages(playerId: string): Promise<string[]> {
     return tmRequest(async () => {
-        try {
-            const url = `https://tmapi-alpha.transfermarkt.technology/player/${playerId}/gallery`;
-            const res = await axios.get(url, {
-                headers: { ...TM_JSON_HEADERS, 'Origin': 'https://www.transfermarkt.com' },
-                timeout: 10000,
-            });
-            const images: any[] = res.data?.data?.images || [];
-            return images.map((img: any) => img.url).filter(Boolean);
-        } catch (e: any) {
-            console.warn(`  [GALLERY ERR] player ${playerId}:`, e.response?.status || e.message);
-            return [];
+        const maxRetries = USE_PROXY ? 2 : 1;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                const url = `https://tmapi-alpha.transfermarkt.technology/player/${playerId}/gallery`;
+                let res;
+                if (USE_PROXY) {
+                    res = await axios.get('https://proxycrawl-crawling.p.rapidapi.com/', {
+                        params: { url },
+                        headers: {
+                            'x-rapidapi-host': 'proxycrawl-crawling.p.rapidapi.com',
+                            'x-rapidapi-key': RAPIDAPI_KEY,
+                        },
+                        timeout: 30000,
+                    });
+                } else {
+                    res = await axios.get(url, {
+                        headers: { ...TM_JSON_HEADERS, 'Origin': 'https://www.transfermarkt.com' },
+                        timeout: 10000,
+                    });
+                }
+                
+                if (typeof res.data === 'string' && (res.data.includes('Access Denied') || res.data.includes('captcha'))) {
+                    console.warn(`  [GALLERY BLOCKED] player ${playerId} — anti-bot detected`);
+                    if (attempt < maxRetries - 1) { await sleep((attempt + 1) * 3000); continue; }
+                    throw new Error('Blocked by anti-bot');
+                }
+
+                const images: any[] = res.data?.data?.images || [];
+                return images.map((img: any) => img.url).filter(Boolean);
+            } catch (e: any) {
+                const status = e.response?.status;
+                if ((status === 403 || status === 429 || status === 502 || status === 503) && attempt < maxRetries - 1) {
+                    await sleep((attempt + 1) * 3000);
+                    continue;
+                }
+                console.warn(`  [GALLERY ERR] player ${playerId}:`, status || e.message);
+                return [];
+            }
         }
+        return [];
     });
 }
 
