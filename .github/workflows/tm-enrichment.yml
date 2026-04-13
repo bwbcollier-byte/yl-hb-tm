@@ -12,9 +12,9 @@ on:
         default: "0"
         type: string
       concurrency:
-        description: "Parallel workers (default: 3)"
+        description: "Parallel workers (default: 20)"
         required: false
-        default: "3"
+        default: "20"
         type: string
 
 jobs:
@@ -40,5 +40,5 @@ jobs:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           PROFILE_LIMIT: ${{ github.event.inputs.profile_limit || '0' }}
-          CONCURRENCY: ${{ github.event.inputs.concurrency || '3' }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency || '20' }}
         run: npx ts-node --transpile-only src/tm-enrichment.ts
