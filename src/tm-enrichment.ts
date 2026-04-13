@@ -9,12 +9,14 @@ import * as cheerio from 'cheerio';
 // ---------------------------------------------------------------------------
 
 const AIRTABLE_API_KEY  = process.env.AIRTABLE_API_KEY!;
+const RAPIDAPI_KEY      = process.env.RAPIDAPI_KEY || '';
 const AIRTABLE_BASE     = process.env.AIRTABLE_BASE     || 'apprT24SuAvV8oZXX';
 const AIRTABLE_TABLE    = process.env.AIRTABLE_TABLE    || 'tblKxel0FfAjklhPe';
 const AIRTABLE_VIEW     = process.env.AIRTABLE_VIEW     || 'viwO4B0htcTlCH69M'; // "Transfermarket Get"
 const PROFILE_LIMIT     = parseInt(process.env.PROFILE_LIMIT || '0');           // 0 = all
 const CONCURRENCY       = parseInt(process.env.CONCURRENCY   || '1');
-const FETCH_DELAY_MS    = parseInt(process.env.FETCH_DELAY   || '1500');        // polite delay per request
+const FETCH_DELAY_MS    = parseInt(process.env.FETCH_DELAY   || '2000');        // polite delay per request
+const USE_PROXY         = !!RAPIDAPI_KEY;                                       // auto-detect proxy mode
 
 const AIRTABLE_BATCH    = 10; // Airtable max patch size
 
@@ -239,13 +241,50 @@ function tmRequest<T>(fn: () => Promise<T>): Promise<T> {
 
 async function fetchProfileHtml(tmUrl: string): Promise<string | null> {
     return tmRequest(async () => {
-        try {
-            const res = await axios.get(tmUrl, { headers: TM_HEADERS, timeout: 15000 });
-            return res.data as string;
-        } catch (e: any) {
-            console.warn(`  [HTTP ${e.response?.status || 'ERR'}] ${tmUrl}: ${e.message}`);
-            return null;
+        const maxRetries = USE_PROXY ? 2 : 1;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                let res;
+                if (USE_PROXY) {
+                    // Route through ProxyCrawl Crawling API on RapidAPI
+                    res = await axios.get('https://proxycrawl-crawling.p.rapidapi.com/', {
+                        params: { url: tmUrl },
+                        headers: {
+                            'x-rapidapi-host': 'proxycrawl-crawling.p.rapidapi.com',
+                            'x-rapidapi-key': RAPIDAPI_KEY,
+                        },
+                        timeout: 30000,
+                    });
+                } else {
+                    // Direct request (works from residential IPs)
+                    res = await axios.get(tmUrl, { headers: TM_HEADERS, timeout: 15000 });
+                }
+                // Check if we got a CAPTCHA / block page
+                const html = res.data as string;
+                if (html.includes('Access Denied') || html.includes('captcha')) {
+                    console.warn(`  [BLOCKED] ${tmUrl} — anti-bot page detected`);
+                    if (attempt < maxRetries - 1) {
+                        const delay = (attempt + 1) * 5000;
+                        console.warn(`  [RETRY ${attempt+1}/${maxRetries}] waiting ${delay}ms...`);
+                        await sleep(delay);
+                        continue;
+                    }
+                    return null;
+                }
+                return html;
+            } catch (e: any) {
+                const status = e.response?.status;
+                if ((status === 403 || status === 429 || status === 503) && attempt < maxRetries - 1) {
+                    const delay = (attempt + 1) * 5000;
+                    console.warn(`  [RETRY ${attempt+1}/${maxRetries}] HTTP ${status} — waiting ${delay}ms...`);
+                    await sleep(delay);
+                    continue;
+                }
+                console.warn(`  [HTTP ${status || 'ERR'}] ${tmUrl}: ${e.message}`);
+                return null;
+            }
         }
+        return null;
     });
 }
 
@@ -603,12 +642,59 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
 // Main
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Health check — verify TM is accessible before processing batch
+// ---------------------------------------------------------------------------
+
+async function healthCheck(): Promise<boolean> {
+    console.log('\n🏥 Running health check...');
+    const testUrl = 'https://www.transfermarkt.com/kylian-mbappe/profil/spieler/342229';
+    try {
+        let res;
+        if (USE_PROXY) {
+            res = await axios.get('https://proxycrawl-crawling.p.rapidapi.com/', {
+                params: { url: testUrl },
+                headers: {
+                    'x-rapidapi-host': 'proxycrawl-crawling.p.rapidapi.com',
+                    'x-rapidapi-key': RAPIDAPI_KEY,
+                },
+                timeout: 30000,
+            });
+        } else {
+            res = await axios.get(testUrl, { headers: TM_HEADERS, timeout: 15000 });
+        }
+        const html = res.data as string;
+        const isBlocked = html.includes('captcha') || html.includes('Access Denied');
+        if (isBlocked) {
+            console.error('❌ Health check: TM returned CAPTCHA / block page');
+            return false;
+        }
+        const hasContent = html.includes('data-header__headline-wrapper');
+        if (!hasContent) {
+            console.warn('⚠️  Health check: page loaded but missing expected selectors');
+        }
+        console.log('✅ Health check passed — TM is accessible via ' + (USE_PROXY ? 'proxy' : 'direct'));
+        return true;
+    } catch (e: any) {
+        console.error(`❌ Health check failed: ${e.response?.status || e.message}`);
+        return false;
+    }
+}
+
 async function run(): Promise<void> {
     const startTime = Date.now();
     console.log('==========================================');
     console.log('⚽ Transfermarkt Enrichment Scraper');
     console.log(`   Concurrency: ${CONCURRENCY} | Limit: ${PROFILE_LIMIT > 0 ? PROFILE_LIMIT : 'all'} | Delay: ${FETCH_DELAY_MS}ms`);
+    console.log(`   Proxy: ${USE_PROXY ? 'RapidAPI ProxyCrawl' : 'DIRECT (no proxy)'}`);
     console.log('==========================================\n');
+
+    // Health check before processing
+    const healthy = await healthCheck();
+    if (!healthy) {
+        console.error('\n🛑 Aborting — TM is not accessible. Check proxy / API key.');
+        process.exit(1);
+    }
 
     const records = await fetchAirtableRecords();
     if (records.length === 0) {
