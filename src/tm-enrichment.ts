@@ -76,7 +76,7 @@ interface TmData {
     placeOfBirth:      string;
     birthCountry:      string;   // country name, used to derive CC
     citizenships:      string;
-    height:            string;
+    height:            number | null;
     position:          string;
     foot:              string;
     clubName:          string;
@@ -151,12 +151,12 @@ function cleanText(s: string | undefined | null): string {
     return (s || '').replace(/\s+/g, ' ').trim();
 }
 
-// "1,79 m" → "179", "N/A" or blank → ""
-function formatHeight(raw: string): string {
-    if (!raw || raw === 'N/A') return '';
+// "1,79 m" → 179 (number), "N/A" or blank → null
+function formatHeight(raw: string): number | null {
+    if (!raw || raw === 'N/A') return null;
     const m = raw.replace(',', '.').match(/[\d.]+/);
-    if (!m) return '';
-    return String(Math.round(parseFloat(m[0]) * 100));
+    if (!m) return null;
+    return Math.round(parseFloat(m[0]) * 100);
 }
 
 // "left" → "Left", "N/A" → ""
@@ -646,46 +646,76 @@ async function processRecord(record: AirtableRecord, index: number, total: numbe
         if (galleryUrls.length > 0) console.log(`  🖼  Gallery: ${galleryUrls.length} images`);
         console.log(`  ✅ ${profile.displayName} | ${profile.clubName} | ${profile.marketValue} | ${perfData.totals.apps} apps`);
 
-        // Map to Airtable fields
-        // Note: TM Total Appearances / Goals / Assists are text fields — send as strings
-        const fields: Record<string, any> = {
-            'TM Full Name':                  profile.fullName            || '',
-            'TM Display Name':               profile.displayName         || '',
-            'TM Shirt Numbers':              profile.shirtNumber         || '',
-            'TM Date of Birth':              profile.dateOfBirth         || '',
-            'TM Place of Birth':             profile.placeOfBirth        || '',
-            'TM CC':                         countryToCode(profile.birthCountry || ''),
-            'TM Citizenships':               profile.citizenships        || '',
-            'TM Height':                     profile.height              || '',
-            'TM Position':                   profile.position            || '',
-            'TM Preferred Foot':             profile.foot                || '',
-            'TM Club Name':                  profile.clubName            || '',
-            'TM Club Link':                  profile.clubLink            || '',
-            'TM League Names':               profile.leagueNames         || '',
-            'TM Contract Expiry Date':       profile.contractExpiry      || '',
-            'TM Current Market Value':       profile.marketValue         || '',
-            'TM Last Updated Date':          profile.marketValueDate     || '',
-            'RM Current International Team': profile.currentIntlTeam     || '',
-            'TM National Caps':              profile.nationalCaps        || '',
-            'TM National Goals':             profile.nationalGoals       || '',
-            'TM Trophies won':               profile.trophies            || '',
-            'TM Player Agent/Agency Name':   profile.agentName           || '',
-            'TM Player Agent/Agency Link':   profile.agentLink           || '',
-            'TM Headshot':                   profile.headshot            || '',
-            'TM Images (gallery)':           galleryUrls.join('\n'),
-            'TM Instagram':                  profile.instagram           || '',
-            'TM Facebook':                   profile.facebook            || '',
-            'TM Tiktok':                     profile.tiktok              || '',
-            'TM Twitter':                    profile.twitter             || '',
-            'TM Website':                    profile.website             || '',
-            'TM Appearances by comp':        appearancesByComp           || '',
-            'TM Total Appearances':          String(perfData.totals.apps    || ''),
-            'TM Goals':                      String(perfData.totals.goals   || ''),
-            'TM Assists':                    String(perfData.totals.assists || ''),
-            'TM Data Status':                'Complete',
+        // ---------------------------------------------------------------------------
+        // Build Airtable payload.
+        //
+        // Safety rules to avoid HTTP 422:
+        //   1. Never send "" for non-text fields (numbers, dates, selects). Use null to clear.
+        //   2. Number fields (Height, Appearances, Goals, Assists) must be numbers, not strings.
+        //   3. singleSelect fields (TM Data Status, TM Preferred Foot) must match valid option
+        //      names exactly; unknown values should be omitted (null).
+        //   4. Date fields (TM Last Check) accept YYYY-MM-DD only — no ISO datetime strings.
+        //   5. Strip all null values before sending so we don't accidentally clear unrelated
+        //      fields that weren't touched this run. (Airtable patch = partial update, but
+        //      explicit null does clear a field.)
+        // ---------------------------------------------------------------------------
+
+        // Valid singleSelect options — must match Airtable configuration exactly.
+        const VALID_STATUS   = new Set(['Complete', 'Error', 'Pending', 'Skipped']);
+        const VALID_FOOT     = new Set(['Left', 'Right', 'Both', '']);
+
+        const rawFoot   = profile.foot || '';
+        const rawStatus = 'Complete';
+
+        const rawFields: Record<string, any> = {
+            'TM Full Name':                  profile.fullName            || null,
+            'TM Display Name':               profile.displayName         || null,
+            'TM Shirt Numbers':              profile.shirtNumber         || null,
+            'TM Date of Birth':              profile.dateOfBirth         || null,
+            'TM Place of Birth':             profile.placeOfBirth        || null,
+            'TM CC':                         countryToCode(profile.birthCountry || '') || null,
+            'TM Citizenships':               profile.citizenships        || null,
+            // Height is a number field — send integer cm or null (never empty string)
+            'TM Height':                     profile.height              ?? null,
+            'TM Position':                   profile.position            || null,
+            // singleSelect — only send if value is a known valid option
+            'TM Preferred Foot':             VALID_FOOT.has(rawFoot) && rawFoot ? rawFoot : null,
+            'TM Club Name':                  profile.clubName            || null,
+            'TM Club Link':                  profile.clubLink            || null,
+            'TM League Names':               profile.leagueNames         || null,
+            'TM Contract Expiry Date':       profile.contractExpiry      || null,
+            'TM Current Market Value':       profile.marketValue         || null,
+            'TM Last Updated Date':          profile.marketValueDate     || null,
+            'RM Current International Team': profile.currentIntlTeam     || null,
+            'TM National Caps':              profile.nationalCaps        || null,
+            'TM National Goals':             profile.nationalGoals       || null,
+            'TM Trophies won':               profile.trophies            || null,
+            'TM Player Agent/Agency Name':   profile.agentName           || null,
+            'TM Player Agent/Agency Link':   profile.agentLink           || null,
+            'TM Headshot':                   profile.headshot            || null,
+            'TM Images (gallery)':           galleryUrls.length > 0 ? galleryUrls.join('\n') : null,
+            'TM Instagram':                  profile.instagram           || null,
+            'TM Facebook':                   profile.facebook            || null,
+            'TM Tiktok':                     profile.tiktok              || null,
+            'TM Twitter':                    profile.twitter             || null,
+            'TM Website':                    profile.website             || null,
+            'TM Appearances by comp':        appearancesByComp           || null,
+            // Number fields — send as numbers, not strings
+            'TM Total Appearances':          perfData.totals.apps    ?? null,
+            'TM Goals':                      perfData.totals.goals   ?? null,
+            'TM Assists':                    perfData.totals.assists ?? null,
+            // singleSelect — only send if it matches a known valid option
+            'TM Data Status':                VALID_STATUS.has(rawStatus) ? rawStatus : null,
+            // Date field — YYYY-MM-DD only (no time component)
             'TM Last Check':                 new Date().toISOString().split('T')[0],
-            'TM Update':                     new Date().toISOString(),
         };
+
+        // Strip null values — don't send keys with null unless you intend to clear the field.
+        // We want a "write what we know" approach: if scraping returns nothing, leave the
+        // existing Airtable value intact rather than blanking it.
+        const fields: Record<string, any> = Object.fromEntries(
+            Object.entries(rawFields).filter(([, v]) => v !== null && v !== undefined)
+        );
 
         updateQueue.push({ id: record.id, fields });
         await flushUpdates();
