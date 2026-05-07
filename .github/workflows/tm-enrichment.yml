@@ -48,4 +48,4 @@ jobs:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           PROFILE_LIMIT: ${{ github.event.inputs.profile_limit || '0' }}
           CONCURRENCY: ${{ github.event.inputs.concurrency || '20' }}
-        run: npx ts-node --transpile-only src/tm-enrichment.ts
+        run: npx tsx src/tm-enrichment.ts
